@@ -2,6 +2,7 @@ from math import ceil
 from typing import Any
 from typing import Dict
 from typing import Optional
+from prometheus_client import Gauge
 
 import redis
 
@@ -75,7 +76,7 @@ class RedisClient(config.Parser):
 
     def parse(self, key_path: str, raw_config: config.RawConfig) -> "RedisContextFactory":
         connection_pool = pool_from_config(raw_config, f"{key_path}.", **self.kwargs)
-        return RedisContextFactory(connection_pool)
+        return RedisContextFactory(connection_pool, key_path)
 
 
 class RedisContextFactory(ContextFactory):
@@ -92,8 +93,28 @@ class RedisContextFactory(ContextFactory):
 
     """
 
-    def __init__(self, connection_pool: redis.ConnectionPool):
+    PROM_PREFIX = "redisbp_pool"
+    PROM_LABELS = ["pool"]
+
+    totalConnections = Gauge(
+        f"{PROM_PREFIX}_connections",
+        "Number of connections in this redisbp pool",
+        PROM_LABELS,
+    )
+    idleConnections = Gauge(
+        f"{PROM_PREFIX}_idle_connections",
+        "Number of idle connections in this redisbp pool",
+        PROM_LABELS,
+    )
+    openConnections = Gauge(
+        f"{PROM_PREFIX}_open_connections",
+        "Number of open connections in this redisbp pool",
+        PROM_LABELS,
+    )
+
+    def __init__(self, connection_pool: redis.ConnectionPool, name="redis"):
         self.connection_pool = connection_pool
+        self.name = name
 
     def report_runtime_metrics(self, batch: metrics.Client) -> None:
         if not isinstance(self.connection_pool, redis.BlockingConnectionPool):
@@ -103,6 +124,10 @@ class RedisContextFactory(ContextFactory):
         open_connections = len(self.connection_pool._connections)  # type: ignore
         available = self.connection_pool.pool.qsize()
         in_use = size - available
+
+        RedisContextFactory.totalConnections.labels(self.name).set(size)
+        RedisContextFactory.idleConnections.labels(self.name).set(available)
+        RedisContextFactory.openConnections.labels(self.name).set(open_connections)
 
         batch.gauge("pool.size").replace(size)
         batch.gauge("pool.in_use").replace(in_use)
